@@ -1,12 +1,18 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"os"
+	"os/signal"
+	"snmpflapd/internal/repository/flapdb"
+	"snmpflapd/internal/services/dbcleanup"
+	"snmpflapd/internal/services/linkevent"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -14,16 +20,16 @@ import (
 )
 
 const (
-	defaultConfigFilename  = "settings.conf"
-	defaultLogFilename     = "snmpflapd.log"
-	defaultListenAddress   = "0.0.0.0"
-	defaultListenPort      = 162
-	defaultDBHost          = "127.0.0.1"
-	defaultDBUser          = "root"
-	defaultDBName          = "snmpflapd"
-	defaultDBPassword      = ""
-	defaultCommunity       = ""
-	queueInterval          = 30
+	defaultConfigFilename = "settings.conf"
+	defaultLogFilename    = "snmpflapd.log"
+	defaultListenAddress  = "0.0.0.0"
+	defaultListenPort     = 162
+	defaultDBHost         = "127.0.0.1"
+	defaultDBUser         = "root"
+	defaultDBName         = "snmpflapd"
+	defaultDBPassword     = ""
+	defaultCommunity      = ""
+	// queueInterval          = 30
 	defaultCleanUpInterval = 60
 )
 
@@ -46,6 +52,7 @@ var (
 	flagVerbose        bool
 	flagConfigFilename string
 	flagVersion        bool
+	period             time.Duration = time.Hour * 6
 )
 
 var config = Config{
@@ -76,6 +83,8 @@ func init() {
 
 func main() {
 
+	ctx, cancel := context.WithCancel(context.TODO())
+
 	if flagVersion {
 		build := fmt.Sprintf("FlapMyPort snmpflapd version %s, build %s", version, build)
 		fmt.Println(build)
@@ -94,20 +103,27 @@ func main() {
 	log.SetOutput(f)
 	log.Println("snmpflapd started")
 
-	connector, err = MakeDB(config.DBHost, config.DBName, config.DBUser, config.DBPassword)
+	connector, err := flapdb.MakeDB(&flapdb.Config{
+		Host:     config.DBHost,
+		DBName:   config.DBName,
+		User:     config.DBUser,
+		Password: config.DBPassword,
+	})
 	if err != nil {
 		fmt.Println(err)
 		log.Fatalln(err)
 	}
-	defer connector.db.Close()
-
-	snmpSema = RequestSemaphore{}
+	defer connector.Close()
 
 	// Periodic DB clean up
-	go RunDBCleanUp()
+	go dbcleanup.RunDBCleanUp(ctx, connector, period)
 
 	tl := g.NewTrapListener()
-	tl.OnNewTrap = handleTrap
+	tl.OnNewTrap = func(packet *g.SnmpPacket, addr *net.UDPAddr) {
+		if linkevent.IsLinkEvent(packet) {
+			go linkevent.LinkEventHandler(ctx, connector, packet, addr, config.Community)
+		}
+	}
 	tl.Params = g.Default
 
 	listenSocket := fmt.Sprintf("%v:%v", config.ListenAddress, config.ListenPort)
@@ -117,6 +133,13 @@ func main() {
 		log.Fatalln(tlErr)
 	}
 
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
+	<-c
+
+	defer func() {
+		cancel()
+	}()
 }
 
 func readConfigFile(file *string) {
@@ -171,26 +194,8 @@ func readConfigEnv() {
 
 }
 
-func handleTrap(packet *g.SnmpPacket, addr *net.UDPAddr) {
-	go asyncHandleTrap(packet, addr)
-}
-
-func asyncHandleTrap(packet *g.SnmpPacket, addr *net.UDPAddr) {
-
-	if isLinkEvent(packet) {
-		LinkEventHandler(packet, addr)
-	}
-}
-
-func RunDBCleanUp() {
-	for {
-		time.Sleep(time.Hour * 6)
-		connector.CleanUp()
-	}
-}
-
-func logVerbose(s string) {
-	if flagVerbose {
-		log.Print(s)
-	}
-}
+// func logVerbose(s string) {
+// 	if flagVerbose {
+// 		log.Print(s)
+// 	}
+// }

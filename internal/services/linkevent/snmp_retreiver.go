@@ -1,22 +1,23 @@
-package main
+package linkevent
 
 import (
 	"errors"
-	g "github.com/gosnmp/gosnmp"
 	"log"
 	"net"
 	"sync"
+
+	g "github.com/gosnmp/gosnmp"
 )
 
 type RequestSemaphore struct {
-	requestQueue []linkEvent
-	mx           sync.Mutex
+	// requestQueue []linkEvent
+	mx sync.Mutex
 }
 
-func doSNMPRequest(oid string, ip net.IP) (pdu *g.SnmpPacket, err error) {
+func doSNMPRequest(oid string, ip net.IP, community string) (pdu *g.SnmpPacket, err error) {
 
 	c := g.Default
-	c.Community = config.Community
+	c.Community = community
 	c.Target = ip.String()
 
 	if err = c.Connect(); err != nil {
@@ -28,12 +29,12 @@ func doSNMPRequest(oid string, ip net.IP) (pdu *g.SnmpPacket, err error) {
 	return g.Default.Get([]string{oid})
 }
 
-func getSNMPString(oid string, ip net.IP) (val *string, err error) {
+func getSNMPString(oid string, ip net.IP, community string) (val *string, err error) {
 
 	snmpSema.mx.Lock()
 	defer snmpSema.mx.Unlock()
 
-	pdu, err := doSNMPRequest(oid, ip)
+	pdu, err := doSNMPRequest(oid, ip, community)
 	if err != nil {
 		return nil, err
 	}
